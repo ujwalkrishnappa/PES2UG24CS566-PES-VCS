@@ -94,9 +94,67 @@ int object_exists(const ObjectID *id) {
 //
 // Returns 0 on success, -1 on error.
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
-    // TODO: Implement
-    (void)type; (void)data; (void)len; (void)id_out;
-    return -1;
+    // Step 1: Build the header string like "blob 16\0"
+    const char *type_str;
+    if (type == OBJ_BLOB)        type_str = "blob";
+    else if (type == OBJ_TREE)   type_str = "tree";
+    else                         type_str = "commit";
+
+    char header[64];
+    int header_len = snprintf(header, sizeof(header), "%s %zu", type_str, len) + 1;
+    // +1 to include the '\0' at end of header
+
+    // Step 2: Build full object = header + data
+    size_t full_len = header_len + len;
+    char *full = malloc(full_len);
+    if (!full) return -1;
+    memcpy(full, header, header_len);
+    memcpy(full + header_len, data, len);
+
+    // Step 3: Hash the full object
+    compute_hash(full, full_len, id_out);
+
+    // Step 4: If already exists, no need to store again (deduplication)
+    if (object_exists(id_out)) {
+        free(full);
+        return 0;
+    }
+
+    // Step 5: Build shard dir path like ".pes/objects/2f"
+    char hex[HASH_HEX_SIZE + 1];
+    hash_to_hex(id_out, hex);
+
+    char shard_dir[512];
+    snprintf(shard_dir, sizeof(shard_dir), "%s/%.2s", OBJECTS_DIR, hex);
+    mkdir(shard_dir, 0755); // create .pes/objects/XX/ if not exists
+
+    // Step 6: Build final path like ".pes/objects/2f/abcd1234..."
+    char final_path[512];
+    snprintf(final_path, sizeof(final_path), "%s/%.2s/%s", OBJECTS_DIR, hex, hex + 2);
+
+    // Step 7: Write to a temp file first
+    char tmp_path[512];
+    snprintf(tmp_path, sizeof(tmp_path), "%s/%.2s/tmp_XXXXXX", OBJECTS_DIR, hex);
+    int fd = mkstemp(tmp_path);
+    if (fd < 0) { free(full); return -1; }
+
+    if (write(fd, full, full_len) != (ssize_t)full_len) {
+        close(fd); free(full); return -1;
+    }
+
+    // Step 8: fsync to make sure data is on disk
+    fsync(fd);
+    close(fd);
+    free(full);
+
+    // Step 9: Rename temp file to final path (atomic)
+    if (rename(tmp_path, final_path) != 0) return -1;
+
+    // Step 10: fsync the shard directory
+    int dir_fd = open(shard_dir, O_RDONLY);
+    if (dir_fd >= 0) { fsync(dir_fd); close(dir_fd); }
+
+    return 0;
 }
 
 // Read an object from the store.
@@ -122,7 +180,51 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
 // The caller is responsible for calling free(*data_out).
 // Returns 0 on success, -1 on error (file not found, corrupt, etc.).
 int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
-    // TODO: Implement
-    (void)id; (void)type_out; (void)data_out; (void)len_out;
-    return -1;
+    // Step 1: Get the file path from the hash
+    char path[512];
+    object_path(id, path, sizeof(path));
+
+    // Step 2: Open and read the whole file
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+
+    fseek(f, 0, SEEK_END);
+    size_t file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    char *buf = malloc(file_size);
+    if (!buf) { fclose(f); return -1; }
+    if (fread(buf, 1, file_size, f) != file_size) {
+        fclose(f); free(buf); return -1;
+    }
+    fclose(f);
+
+    // Step 3: Verify integrity — re-hash and compare to expected
+    ObjectID computed;
+    compute_hash(buf, file_size, &computed);
+    if (memcmp(computed.hash, id->hash, HASH_SIZE) != 0) {
+        free(buf); return -1; // corrupted!
+    }
+
+    // Step 4: Find the '\0' that separates header from data
+    char *null_pos = memchr(buf, '\0', file_size);
+    if (!null_pos) { free(buf); return -1; }
+
+    // Step 5: Parse type from header (e.g. "blob 16")
+    if      (strncmp(buf, "blob",   4) == 0) *type_out = OBJ_BLOB;
+    else if (strncmp(buf, "tree",   4) == 0) *type_out = OBJ_TREE;
+    else if (strncmp(buf, "commit", 6) == 0) *type_out = OBJ_COMMIT;
+    else { free(buf); return -1; }
+
+    // Step 6: Copy the data portion (after the '\0') into output
+    char *data_start = null_pos + 1;
+    size_t data_len = file_size - (data_start - buf);
+
+    *data_out = malloc(data_len);
+    if (!*data_out) { free(buf); return -1; }
+    memcpy(*data_out, data_start, data_len);
+    *len_out = data_len;
+
+    free(buf);
+    return 0;
 }
