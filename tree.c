@@ -195,7 +195,7 @@ static int write_tree_level(IndexEntry *entries, int count, const char *prefix, 
 }
 
 int tree_from_index(ObjectID *id_out) {
-    Index index;
+    static Index index;
     if (index_load(&index) != 0) return -1;
     if (index.count == 0) return -1;
     return write_tree_level(index.entries, index.count, NULL, id_out);
