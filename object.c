@@ -138,9 +138,10 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
     int fd = mkstemp(tmp_path);
     if (fd < 0) { free(full); return -1; }
 
-    if (write(fd, full, full_len) != (ssize_t)full_len) {
-        close(fd); free(full); return -1;
-    }
+   if (write(fd, full, full_len) != (ssize_t)full_len) {
+    perror("write failed");   // ADD THIS LINE
+    close(fd); free(full); return -1;
+}
 
     // Step 8: fsync to make sure data is on disk
     fsync(fd);

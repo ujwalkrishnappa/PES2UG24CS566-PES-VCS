@@ -8,7 +8,7 @@
 //
 // Example single entry (conceptual):
 //   "100644 hello.txt\0" followed by 32 raw bytes of SHA-256
-
+#include "index.h"
 #include "tree.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -129,9 +129,74 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 //   - object_write    : save that binary buffer to the store as OBJ_TREE
 //
 // Returns 0 on success, -1 on error.
+static int write_tree_level(IndexEntry *entries, int count, const char *prefix, ObjectID *id_out) {
+    Tree tree;
+    tree.count = 0;
+
+    int i = 0;
+    while (i < count) {
+        const char *path = entries[i].path;
+
+        // Strip the prefix to get relative path
+        if (prefix && strncmp(path, prefix, strlen(prefix)) == 0)
+            path += strlen(prefix);
+
+        // Check if this entry is in a subdirectory
+        char *slash = strchr(path, '/');
+
+        if (slash == NULL) {
+            // It's a plain file — add directly as blob entry
+            TreeEntry *te = &tree.entries[tree.count++];
+            te->mode = entries[i].mode;
+            te->hash = entries[i].hash;
+            strncpy(te->name, path, sizeof(te->name) - 1);
+            te->name[sizeof(te->name) - 1] = '\0';
+            i++;
+        } else {
+            // It's inside a subdirectory — collect all entries for that subdir
+            char dirname[256];
+            size_t dir_len = slash - path;
+            strncpy(dirname, path, dir_len);
+            dirname[dir_len] = '\0';
+
+            // Build full prefix for subdir
+            char subprefix[512];
+            if (prefix)
+                snprintf(subprefix, sizeof(subprefix), "%s%s/", prefix, dirname);
+            else
+                snprintf(subprefix, sizeof(subprefix), "%s/", dirname);
+
+            // Count how many entries belong to this subdir
+            int start = i;
+            while (i < count && strncmp(entries[i].path, subprefix, strlen(subprefix)) == 0)
+                i++;
+
+            // Recursively write the subtree
+            ObjectID sub_id;
+            if (write_tree_level(entries + start, i - start, subprefix, &sub_id) != 0)
+                return -1;
+
+            // Add the subtree as a directory entry
+            TreeEntry *te = &tree.entries[tree.count++];
+            te->mode = 0040000;
+            te->hash = sub_id;
+            strncpy(te->name, dirname, sizeof(te->name) - 1);
+            te->name[sizeof(te->name) - 1] = '\0';
+        }
+    }
+
+    // Serialize the tree and write it to the object store
+    void *data;
+    size_t len;
+    if (tree_serialize(&tree, &data, &len) != 0) return -1;
+    int rc = object_write(OBJ_TREE, data, len, id_out);
+    free(data);
+    return rc;
+}
+
 int tree_from_index(ObjectID *id_out) {
-    // TODO: Implement recursive tree building
-    // (See Lab Appendix for logical steps)
-    (void)id_out;
-    return -1;
+    Index index;
+    if (index_load(&index) != 0) return -1;
+    if (index.count == 0) return -1;
+    return write_tree_level(index.entries, index.count, NULL, id_out);
 }

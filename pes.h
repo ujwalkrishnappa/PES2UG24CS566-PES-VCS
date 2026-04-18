@@ -43,7 +43,17 @@ void hash_to_hex(const ObjectID *id, char *hex_out);
 // Convert a 64-character hex string to a binary hash.
 // Returns 0 on success, -1 if hex contains invalid characters.
 int hex_to_hash(const char *hex, ObjectID *id_out);
+// ─── Object Store (implement in object.c) ──────────────────────────────────
 
+// Write an object to .pes/objects/<xx>/<remaining-hex>.
+// Computes SHA-256 of (type_prefix + content), stores compressed/raw.
+// Returns 0 on success, -1 on error. Fills *id_out with the hash.
+int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
+
+// Read an object from the object store by its hash.
+// Sets *type_out, allocates *data_out (caller must free), sets *len_out.
+// Returns 0 on success, -1 on error.
+int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out);
 // ─── Author Configuration ───────────────────────────────────────────────────
 // PES-VCS reads the author name from the environment variable PES_AUTHOR.
 // If unset, it defaults to "PES User <pes@localhost>".
